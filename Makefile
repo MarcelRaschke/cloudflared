@@ -30,6 +30,10 @@ ifdef PACKAGE_MANAGER
 	VERSION_FLAGS := $(VERSION_FLAGS) -X "github.com/cloudflare/cloudflared/cmd/cloudflared/updater.BuiltForPackageManager=$(PACKAGE_MANAGER)"
 endif
 
+ifdef CONTAINER_BUILD 
+	VERSION_FLAGS := $(VERSION_FLAGS) -X "github.com/cloudflare/cloudflared/metrics.Runtime=virtual"
+endif
+
 LINK_FLAGS :=
 ifeq ($(FIPS), true)
 	LINK_FLAGS := -linkmode=external -extldflags=-static $(LINK_FLAGS)
@@ -129,11 +133,9 @@ clean:
 cloudflared:
 ifeq ($(FIPS), true)
 	$(info Building cloudflared with go-fips)
-	cp -f fips/fips.go.linux-amd64 cmd/cloudflared/fips.go
 endif
 	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) $(ARM_COMMAND) go build -mod=vendor $(GO_BUILD_TAGS) $(LDFLAGS) $(IMPORT_PATH)/cmd/cloudflared
 ifeq ($(FIPS), true)
-	rm -f cmd/cloudflared/fips.go
 	./check-fips.sh cloudflared
 endif
 
@@ -165,9 +167,17 @@ cover:
 	# Generate the HTML report that can be viewed from the browser in CI.
 	$Q go tool cover -html ".cover/c.out" -o .cover/all.html
 
-.PHONY: test-ssh-server
-test-ssh-server:
-	docker-compose -f ssh_server_tests/docker-compose.yml up
+.PHONY: fuzz
+fuzz:
+	@go test -fuzz=FuzzIPDecoder -fuzztime=600s ./packet
+	@go test -fuzz=FuzzICMPDecoder -fuzztime=600s ./packet
+	@go test -fuzz=FuzzSessionWrite -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzSessionServe -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzRegistrationDatagram -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzPayloadDatagram -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzRegistrationResponseDatagram -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzNewIdentity -fuzztime=600s ./tracing
+	@go test -fuzz=FuzzNewAccessValidator -fuzztime=600s ./validation
 
 .PHONY: install-go
 install-go:
@@ -218,6 +228,10 @@ cloudflared-pkg: cloudflared cloudflared.1
 cloudflared-msi:
 	wixl --define Version=$(VERSION) --define Path=$(EXECUTABLE_PATH) --output cloudflared-$(VERSION)-$(TARGET_ARCH).msi cloudflared.wxs
 
+.PHONY: github-release-dryrun
+github-release-dryrun:
+	python3 github_release.py --path $(PWD)/built_artifacts --release-version $(VERSION) --dry-run
+
 .PHONY: github-release
 github-release:
 	python3 github_release.py --path $(PWD)/built_artifacts --release-version $(VERSION)
@@ -239,4 +253,17 @@ vet:
 
 .PHONY: fmt
 fmt:
-	goimports -l -w -local github.com/cloudflare/cloudflared $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc/proto)
+	@goimports -l -w -local github.com/cloudflare/cloudflared $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc/proto)
+	@go fmt $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc/proto)
+
+.PHONY: fmt-check
+fmt-check:
+	@./fmt-check.sh
+
+.PHONY: lint
+lint:
+	@golangci-lint run
+
+.PHONY: mocks
+mocks:
+	go generate mocks/mockgen.go
